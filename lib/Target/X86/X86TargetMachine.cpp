@@ -82,6 +82,9 @@ extern "C" void LLVMInitializeX86Target() {
   initializeX86ExecutionDepsFixPass(PR);
   initializeX86DomainReassignmentPass(PR);
   initializeX86FlagsCopyLoweringPassPass(PR);
+
+  initializeX86MachineInstrPrinterPass(PR);
+  initializeX86RegisterAllocatorPass(PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -419,6 +422,11 @@ void X86PassConfig::addPreRegAlloc() {
 
   addPass(createX86FlagsCopyLoweringPass());
   addPass(createX86WinAllocaExpander());
+
+  // pre reg alloc print instructions
+  addPass(createX86MachineInstrPrinter());
+  addPass(createX86RegisterAllocator());
+  
 }
 void X86PassConfig::addMachineSSAOptimization() {
   addPass(createX86DomainReassignmentPass());
@@ -427,6 +435,9 @@ void X86PassConfig::addMachineSSAOptimization() {
 
 void X86PassConfig::addPostRegAlloc() {
   addPass(createX86FloatingPointStackifierPass());
+
+  // post reg alloc print instructions
+  // addPass(createX86MachineInstrPrinter());
 }
 
 void X86PassConfig::addPreSched2() { addPass(createX86ExpandPseudoPass()); }

@@ -115,6 +115,12 @@ InstructionSelector *createX86InstructionSelector(const X86TargetMachine &TM,
 
 void initializeEvexToVexInstPassPass(PassRegistry &);
 
+FunctionPass *createX86MachineInstrPrinter();
+void initializeX86MachineInstrPrinterPass(PassRegistry &);
+
+FunctionPass *createX86RegisterAllocator();
+void initializeX86RegisterAllocatorPass(PassRegistry &);
+
 } // End llvm namespace
 
 #endif
