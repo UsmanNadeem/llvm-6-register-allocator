@@ -242,6 +242,14 @@ public:
 };
 
 bool X86RegisterAllocator::runOnMachineFunction(MachineFunction &MF) {
+    // cleanup from previous function run...if any
+    for (LiveRange* LR : interferenceGraph) {
+        delete LR;
+    }
+    interferenceGraph.clear();
+    interferenceGraphRetrieval.clear();
+    livenessInformation.clear();
+    phiNodes.clear();
 
     MachineRegisterInfo& regInfo = MF.getRegInfo();
     calcGlobalLivenessInfo(MF, regInfo);
