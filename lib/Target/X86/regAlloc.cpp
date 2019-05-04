@@ -73,19 +73,6 @@ class X86RegisterAllocator : public MachineFunctionPass {
 public:
     static char ID;
 
-    X86RegisterAllocator() : MachineFunctionPass(ID) {
-        initializeX86RegisterAllocatorPass(*PassRegistry::getPassRegistry());
-    }
-
-    bool runOnMachineFunction(MachineFunction &MF) override;
-
-    StringRef getPassName() const override { 
-        return X86_REGISTER_ALLOCATOR_PASS_NAME; 
-    }
-
-    void calcGlobalLivenessInfo(MachineFunction &MF, MachineRegisterInfo& regInfo);
-
-    // .. todo merge ranges ..
     // might want to change to a vector
     std::set<LiveRange*> interferenceGraph;
     std::map<unsigned, LiveRange*> interferenceGraphRetrieval;
@@ -93,6 +80,20 @@ public:
 
     // list of phi nodes that we need to remove after reg allocation
     std::set<MachineInstr*> phiNodes;
+
+    X86RegisterAllocator() : MachineFunctionPass(ID) {
+        initializeX86RegisterAllocatorPass(*PassRegistry::getPassRegistry());
+    }
+
+    StringRef getPassName() const override { 
+        return X86_REGISTER_ALLOCATOR_PASS_NAME; 
+    }
+
+    bool runOnMachineFunction(MachineFunction &MF) override;
+
+    void calcGlobalLivenessInfo(MachineFunction &MF, MachineRegisterInfo& regInfo);
+
+    void calcLivenessForDef(MachineInstr* def, MachineOperand& defOp, MachineRegisterInfo& regInfo);
 
     std::set<MachineInstr*> getPhiNodes() {
         return phiNodes;
@@ -136,107 +137,6 @@ public:
         }
 
         return interferingRanges;
-    }
-
-    void calcLivenessForDef(MachineInstr* def, MachineOperand& defOp, MachineRegisterInfo& regInfo) {
-        // go up the CFG until we reach the def 
-        // SSA means that def dominates all uses so we dont need to 
-        // go over the whole cfg
-        // for all such paths and all such instructions
-        // mark the virtual register as live-in for those instructions
-
-        std::set<MachineInstr*> liveInstrs;
-
-        // share this set for all `uses` to prune search early
-        // and avoid redundant work
-        std::set<MachineBasicBlock*> VisitedBBlist;
-
-        unsigned regNum = defOp.getReg();
-        LiveRange* LR = getLiveRangeFor(regNum);
-
-        outs() << "\tWalking the CFG for all uses\n";
-        for (MachineInstr& u : regInfo.use_instructions(regNum)) {
-            MachineInstr* user = &u;
-            MachineInstr* CurrMI = user;
-
-            // Phi nodes are special. the use operands might not be dominated by their defs 
-            // so propogate the liveness information 
-            // across ONLY the corresponding parent branches
-            if (user->isPHI()) {
-                addPhiNode(user);
-
-                // set CurrMI to be the last instruction of the phi's parent
-                CurrMI = &(user->getOperand(user->findRegisterUseOperandIdx(regNum) + 1).getMBB()->instr_back());
-            }
-
-            std::queue<MachineBasicBlock*> BBlist;
-            liveInstrs.insert(CurrMI);
-            VisitedBBlist.insert(CurrMI->getParent());
-
-            // liveness analysis starting for instrs in the current BB where we have the use
-            while (MachineInstr* MI = CurrMI->getPrevNode()) {
-                CurrMI = MI;
-                if (MI == def) break;
-
-                liveInstrs.insert(CurrMI);
-            }
-
-            // add all preds of current BB to worklist if not already visited
-            if (CurrMI != def) {
-                for (MachineBasicBlock* MBB : CurrMI->getParent()->predecessors()) {
-                    if (!VisitedBBlist.count(MBB)) BBlist.push(MBB);
-                }
-            }
-
-
-            // liveness analysis for all other BBs
-            while (!BBlist.empty()) {
-                // get the last instr
-                MachineBasicBlock* curBB = BBlist.front();
-                BBlist.pop();
-
-                if (VisitedBBlist.count(curBB)) {
-                    continue;
-                }
-
-                VisitedBBlist.insert(curBB);
-                CurrMI = &(curBB->instr_back());
-
-                // reverse iterate
-                for (MachineInstr* MI = CurrMI; MI != NULL; MI = CurrMI->getPrevNode()) {
-                    CurrMI = MI;
-                    if (MI == def) break;
-
-                    liveInstrs.insert(CurrMI);
-                }
-
-                // add all preds of current BB to worklist if not already visited
-                if (CurrMI != def) {
-                    for (MachineBasicBlock* MBB : CurrMI->getParent()->predecessors()) {
-                        if (!VisitedBBlist.count(MBB)) BBlist.push(MBB);
-                    }
-                }
-            }  // goto BB worklist's next element
-        }
-
-        outs() << "\tUpdating Liveness data structures\n";
-
-        // remove all phi's from the live set
-        for (std::set<MachineInstr*>::iterator i = liveInstrs.begin(); i != liveInstrs.end();) {
-            if ((*i)->isPHI()) {
-                i = liveInstrs.erase(i);
-            } else {
-                ++i;
-            }
-        }
-
-        // update the live range
-        LR->addLiveInstrs(liveInstrs);
-
-        // update the MI-to-virtRegs liveness map
-        for (MachineInstr* MI : liveInstrs) {
-            livenessInformation[MI].insert(regNum);
-        }
     }
 
 };
@@ -354,9 +254,109 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
         }
     }  // end live range (phi) merge loop
     outs() << "*** Total Number of live ranges: " << interferenceGraph.size() << "\n";
-
 }
 
+void X86RegisterAllocator::calcLivenessForDef(MachineInstr* def, MachineOperand& defOp, MachineRegisterInfo& regInfo) {
+    // go up the CFG until we reach the def 
+    // SSA means that def dominates all uses so we dont need to 
+    // go over the whole cfg
+    // for all such paths and all such instructions
+    // mark the virtual register as live-in for those instructions
+
+    std::set<MachineInstr*> liveInstrs;
+
+    // share this set for all `uses` to prune search early
+    // and avoid redundant work
+    std::set<MachineBasicBlock*> VisitedBBlist;
+
+    unsigned regNum = defOp.getReg();
+    LiveRange* LR = getLiveRangeFor(regNum);
+
+    outs() << "\tWalking the CFG for all uses\n";
+    for (MachineInstr& u : regInfo.use_instructions(regNum)) {
+        MachineInstr* user = &u;
+        MachineInstr* CurrMI = user;
+
+        // Phi nodes are special. the use operands might not be dominated by their defs 
+        // so propogate the liveness information 
+        // across ONLY the corresponding parent branches
+        if (user->isPHI()) {
+            addPhiNode(user);
+
+            // set CurrMI to be the last instruction of the phi's parent
+            CurrMI = &(user->getOperand(user->findRegisterUseOperandIdx(regNum) + 1).getMBB()->instr_back());
+        }
+
+        std::queue<MachineBasicBlock*> BBlist;
+        liveInstrs.insert(CurrMI);
+        VisitedBBlist.insert(CurrMI->getParent());
+
+        // liveness analysis starting for instrs in the current BB where we have the use
+        while (MachineInstr* MI = CurrMI->getPrevNode()) {
+            CurrMI = MI;
+            if (MI == def) break;
+
+            liveInstrs.insert(CurrMI);
+        }
+
+        // add all preds of current BB to worklist if not already visited
+        if (CurrMI != def) {
+            for (MachineBasicBlock* MBB : CurrMI->getParent()->predecessors()) {
+                if (!VisitedBBlist.count(MBB)) BBlist.push(MBB);
+            }
+        }
+
+
+        // liveness analysis for all other BBs
+        while (!BBlist.empty()) {
+            // get the last instr
+            MachineBasicBlock* curBB = BBlist.front();
+            BBlist.pop();
+
+            if (VisitedBBlist.count(curBB)) {
+                continue;
+            }
+
+            VisitedBBlist.insert(curBB);
+            CurrMI = &(curBB->instr_back());
+
+            // reverse iterate
+            for (MachineInstr* MI = CurrMI; MI != NULL; MI = CurrMI->getPrevNode()) {
+                CurrMI = MI;
+                if (MI == def) break;
+
+                liveInstrs.insert(CurrMI);
+            }
+
+            // add all preds of current BB to worklist if not already visited
+            if (CurrMI != def) {
+                for (MachineBasicBlock* MBB : CurrMI->getParent()->predecessors()) {
+                    if (!VisitedBBlist.count(MBB)) BBlist.push(MBB);
+                }
+            }
+        }  // goto BB worklist's next element
+    }
+
+    outs() << "\tUpdating Liveness data structures\n";
+
+    // remove all phi's from the live set
+    for (std::set<MachineInstr*>::iterator i = liveInstrs.begin(); i != liveInstrs.end();) {
+        if ((*i)->isPHI()) {
+            i = liveInstrs.erase(i);
+        } else {
+            ++i;
+        }
+    }
+
+    // update the live range
+    LR->addLiveInstrs(liveInstrs);
+
+    // update the MI-to-virtRegs liveness map
+    for (MachineInstr* MI : liveInstrs) {
+        livenessInformation[MI].insert(regNum);
+    }
+}
+    
 } // end of anonymous namespace
 
 char X86RegisterAllocator::ID = 0;
