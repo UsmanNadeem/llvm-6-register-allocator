@@ -426,6 +426,7 @@ void X86PassConfig::addPreRegAlloc() {
   // pre reg alloc print instructions
   addPass(createX86MachineInstrPrinter());
   addPass(createX86RegisterAllocator());
+  addPass(createX86MachineInstrPrinter());
   
 }
 void X86PassConfig::addMachineSSAOptimization() {
