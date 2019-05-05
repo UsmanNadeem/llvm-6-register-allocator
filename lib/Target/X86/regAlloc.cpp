@@ -226,8 +226,33 @@ BEGINNING:
 
 EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterInfo& regInfo) {
 
-    unsigned numPhysRegs= 3;
-    // unsigned numPhysRegs= .. todo;
+    unsigned _virtReg = *((*interferenceGraph.begin())->virtRegs.begin());
+    const TargetRegisterClass* tRegClass = regInfo.getRegClass(_virtReg);
+    BitVector regBitVec = MF.getSubtarget().getRegisterInfo()->getAllocatableSet(MF, tRegClass);
+    unsigned numPhysRegs = regBitVec.count();
+
+    // misc code for checking number of registers in different register classes
+    // all of them (64-bit, 32-bit, 8-bit) are returning 15 for my sample code
+
+    // for (std::set<LiveRange*>::iterator i = interferenceGraph.begin(); i != interferenceGraph.end();++i) {
+    //         for (unsigned virtReg : (*i)->virtRegs) {
+    //             const TargetRegisterClass* tRegClass = regInfo.getRegClass(virtReg);
+    //             BitVector regBitVec = MF.getSubtarget().getRegisterInfo()->getAllocatableSet(MF, tRegClass);
+    //              numPhysRegs = regBitVec.count();
+    // outs() << "Total of N = " << numPhysRegs << " Registers in architecture\n";
+    //     for (auto index : regBitVec.set_bits()) {
+    //     outs() << "Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
+    // }
+    //         }
+    //     }
+
+    outs() << "*** Total of N = " << numPhysRegs << " Registers in architecture\n";
+    for (auto index : regBitVec.set_bits()) {
+        outs() << "\tReg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
+    }
+    
+
+
     std::stack<LiveRange*> colorStack;
 
     // too time consuming
@@ -290,13 +315,18 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
                 // dont want to choose already spilled ranges 
                 // eventhough they might have the lowest cost
                 if ((*i)->contains(spilledRegisters)) continue;
-                
+
                 double currCost = (*i)->calculateAndGetCostRatio(regInfo);
                 if (currCost < costRatio) {
                     spillRange = *i;
                     costRatio = currCost;
                 }
             }
+
+            assert(spillRange != NULL && "Could not find any node to spill");
+            // if (spillRange == NULL) {
+            //     return EXIT_STATUS_T::FAILED;
+            // }
 
             outs() << "\t\t*** Spilling live range class for reg #'s: ";
             for (unsigned virtReg : spillRange->virtRegs) {
@@ -383,6 +413,8 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
         }  // end if (!removedSomething) in the stack pushing phase
     }  // end while (interferenceGraph.size() > 0)  --> the stack pushing phase
 
+// now start popping from the stack and assign actual physical registers
+    
     return EXIT_STATUS_T::DONE;
 }
 
