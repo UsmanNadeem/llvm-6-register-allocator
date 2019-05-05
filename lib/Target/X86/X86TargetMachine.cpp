@@ -53,7 +53,7 @@ using namespace llvm;
 static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
                                cl::desc("Enable the machine combiner pass"),
                                cl::init(true), cl::Hidden);
-
+extern cl::opt<bool> CustomRegAlloc;
 namespace llvm {
 
 void initializeWinEHStatePassPass(PassRegistry &);
@@ -424,9 +424,9 @@ void X86PassConfig::addPreRegAlloc() {
   addPass(createX86WinAllocaExpander());
 
   // pre reg alloc print instructions
-  addPass(createX86MachineInstrPrinter());
-  addPass(createX86RegisterAllocator());
-  addPass(createX86MachineInstrPrinter());
+  // addPass(createX86MachineInstrPrinter());
+  // addPass(createX86RegisterAllocator());
+  // addPass(createX86MachineInstrPrinter());
   
 }
 void X86PassConfig::addMachineSSAOptimization() {
@@ -435,6 +435,8 @@ void X86PassConfig::addMachineSSAOptimization() {
 }
 
 void X86PassConfig::addPostRegAlloc() {
+  if (CustomRegAlloc)
+    addPass(createX86RegisterAllocator());
   addPass(createX86FloatingPointStackifierPass());
 
   // post reg alloc print instructions

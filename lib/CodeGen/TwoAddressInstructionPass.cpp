@@ -1263,6 +1263,13 @@ tryInstructionTransform(MachineBasicBlock::iterator &mi,
   unsigned regA = MI.getOperand(DstIdx).getReg();
   unsigned regB = MI.getOperand(SrcIdx).getReg();
 
+  if (!TargetRegisterInfo::isVirtualRegister(regB)) {
+    errs() << "\n\nERROR:\n";
+    errs() << "Instruction: " << MI;
+    errs() << "RegA/Dest: " << MI.getOperand(DstIdx) << "\n";
+    errs() << "RegB/Src (should be virtual): " << MI.getOperand(SrcIdx) << "\n";
+    errs() << "\nERREND.\n";
+  }
   assert(TargetRegisterInfo::isVirtualRegister(regB) &&
          "cannot make instruction into two-address form");
   bool regBKilled = isKilled(MI, regB, MRI, TII, LIS, true);

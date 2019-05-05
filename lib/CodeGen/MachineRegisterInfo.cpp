@@ -65,6 +65,22 @@ void MachineRegisterInfo::setRegBank(unsigned Reg,
   VRegInfo[Reg].first = &RegBank;
 }
 
+static const TargetRegisterClass *
+constrainRegClass(MachineRegisterInfo &MRI, unsigned Reg,
+                 const TargetRegisterClass *OldRC,
+                 const TargetRegisterClass *RC, unsigned MinNumRegs) {
+ if (OldRC == RC)
+   return RC;
+ const TargetRegisterClass *NewRC =
+     MRI.getTargetRegisterInfo()->getCommonSubClass(OldRC, RC);
+ if (!NewRC || NewRC == OldRC)
+   return NewRC;
+ if (NewRC->getNumRegs() < MinNumRegs)
+   return nullptr;
+ MRI.setRegClass(Reg, NewRC);
+ return NewRC;
+}
+ 
 const TargetRegisterClass *
 MachineRegisterInfo::constrainRegClass(unsigned Reg,
                                        const TargetRegisterClass *RC,
@@ -80,6 +96,36 @@ MachineRegisterInfo::constrainRegClass(unsigned Reg,
     return nullptr;
   setRegClass(Reg, NewRC);
   return NewRC;
+}
+
+bool
+MachineRegisterInfo::constrainRegAttrs(unsigned Reg,
+                                      unsigned ConstrainingReg,
+                                      unsigned MinNumRegs) {
+ const LLT RegTy = getType(Reg);
+ const LLT ConstrainingRegTy = getType(ConstrainingReg);
+ if (RegTy.isValid() && ConstrainingRegTy.isValid() &&
+     RegTy != ConstrainingRegTy)
+   return false;
+ const auto ConstrainingRegCB = getRegClassOrRegBank(ConstrainingReg);
+ if (!ConstrainingRegCB.isNull()) {
+   const auto RegCB = getRegClassOrRegBank(Reg);
+   if (RegCB.isNull())
+     setRegClassOrRegBank(Reg, ConstrainingRegCB);
+   else if (RegCB.is<const TargetRegisterClass *>() !=
+            ConstrainingRegCB.is<const TargetRegisterClass *>())
+     return false;
+   else if (RegCB.is<const TargetRegisterClass *>()) {
+     if (!::constrainRegClass(
+             *this, Reg, RegCB.get<const TargetRegisterClass *>(),
+             ConstrainingRegCB.get<const TargetRegisterClass *>(), MinNumRegs))
+       return false;
+   } else if (RegCB != ConstrainingRegCB)
+     return false;
+ }
+ if (ConstrainingRegTy.isValid())
+   setType(Reg, ConstrainingRegTy);
+ return true;
 }
 
 bool

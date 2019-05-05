@@ -202,6 +202,12 @@ public:
 };
 
 bool X86RegisterAllocator::runOnMachineFunction(MachineFunction &MF) {
+    outs() << "\n" << "=====================\n" << MF.getName() << "()\n=====================" <<"\n";
+    for (auto &MBB : MF) {
+        outs() << "Contents of MachineBasicBlock:\n";
+        outs() << MBB << "\n";
+        outs().flush();
+    }
     // cleanup from previous function run...if any
     spilledRegisters.clear();
 BEGINNING:
@@ -215,21 +221,37 @@ BEGINNING:
 
     MachineRegisterInfo& regInfo = MF.getRegInfo();
     calcGlobalLivenessInfo(MF, regInfo);
-    if (color(MF, regInfo) == EXIT_STATUS_T::SPILLED) {
+
+    if (interferenceGraph.size() > 0 && color(MF, regInfo) == EXIT_STATUS_T::SPILLED) {
         // return true;
         goto BEGINNING;
     }
 
-    return false;
+    for (MachineInstr* MI : getPhiNodes()) {
+        MI->eraseFromParent();
+    }
+    MF.getProperties().set(MachineFunctionProperties::Property::NoPHIs);
+    MF.getProperties().set(MachineFunctionProperties::Property::NoVRegs);
+
+    outs() << "\n\n";
+    for (auto &MBB : MF) {
+        outs() << "Contents of MachineBasicBlock:\n";
+        outs() << MBB << "\n";
+        outs().flush();
+    }
+    return true;
 }
 
 
 EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterInfo& regInfo) {
 
-    unsigned _virtReg = *((*interferenceGraph.begin())->virtRegs.begin());
-    const TargetRegisterClass* tRegClass = regInfo.getRegClass(_virtReg);
-    BitVector regBitVec = MF.getSubtarget().getRegisterInfo()->getAllocatableSet(MF, tRegClass);
-    unsigned numPhysRegs = regBitVec.count();
+    const TargetRegisterInfo* tRegInfo = MF.getSubtarget().getRegisterInfo();
+    const TargetInstrInfo* tInstrInfo = MF.getSubtarget().getInstrInfo();
+    
+    // get any virtual reg num; just for the purpose of getting the allocatable reg list size
+    unsigned temp_virtReg = *((*interferenceGraph.begin())->virtRegs.begin());
+    BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, regInfo.getRegClass(temp_virtReg));
+    unsigned numPhysRegs = temp_regBitVec.count();
 
     // misc code for checking number of registers in different register classes
     // all of them (64-bit, 32-bit, 8-bit) are returning 15 for my sample code
@@ -237,23 +259,23 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     // for (std::set<LiveRange*>::iterator i = interferenceGraph.begin(); i != interferenceGraph.end();++i) {
     //         for (unsigned virtReg : (*i)->virtRegs) {
     //             const TargetRegisterClass* tRegClass = regInfo.getRegClass(virtReg);
-    //             BitVector regBitVec = MF.getSubtarget().getRegisterInfo()->getAllocatableSet(MF, tRegClass);
-    //              numPhysRegs = regBitVec.count();
+    //             BitVector temp_regBitVec = MF.getSubtarget().getRegisterInfo()->getAllocatableSet(MF, tRegClass);
+    //              numPhysRegs = temp_regBitVec.count();
     // outs() << "Total of N = " << numPhysRegs << " Registers in architecture\n";
-    //     for (auto index : regBitVec.set_bits()) {
+    //     for (auto index : temp_regBitVec.set_bits()) {
     //     outs() << "Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
     // }
     //         }
     //     }
 
     outs() << "*** Total of N = " << numPhysRegs << " Allocatable Registers in architecture\n";
-    for (auto index : regBitVec.set_bits()) {
-        outs() << "\tAllocatable Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
+    for (auto index : temp_regBitVec.set_bits()) {
+        outs() << "\tAllocatable Reg: " << tRegInfo->getRegAsmName(index) << "\n";
     }
     //// now print regs that are not Allocatable
-    // regBitVec = regBitVec.flip();
+    // temp_regBitVec = temp_regBitVec.flip();
 
-    // for (auto index : regBitVec.set_bits()) {
+    // for (auto index : temp_regBitVec.set_bits()) {
     //     outs() << "\tNOT-Allocatable Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
     // }
 
@@ -341,11 +363,7 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
 
             // todo also check if we are picking something that is already on the stack
             unsigned _virtReg = *(spillRange->virtRegs.begin());
-
-
-            const TargetRegisterInfo* tRegInfo = MF.getSubtarget().getRegisterInfo();
             const TargetRegisterClass* tRegClass = regInfo.getRegClass(_virtReg);
-            const TargetInstrInfo* tInstrInfo = MF.getSubtarget().getInstrInfo();
 
             int stackSlot = MF.getFrameInfo().CreateSpillStackObject(
                                 tRegInfo->getSpillSize(*tRegClass), 
@@ -419,10 +437,81 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     }  // end while (interferenceGraph.size() > 0)  --> the stack pushing phase
 
 // now start popping from the stack and assign actual physical registers
-    
+    while (!colorStack.empty()) {
+        LiveRange* LR = colorStack.top();
+        colorStack.pop();
+        unsigned currVirtReg = *(LR->virtRegs.begin());
+        // auto tRegClass = regInfo.getRegClass(currVirtReg);
+        // if (tRegClass->isASubClass()) {
+        // iterator sorted by order so we get the biggest class
+            // outs() << tRegInfo->getRegClassName (tRegClass) << "\n";
+            // outs() << tRegInfo->getRegClassName (tRegInfo->getLargestLegalSuperClass (tRegClass, MF)) << "\n";
+
+            // for (auto i = tRegClass->getSuperClasses(); *i != NULL; ++i) {
+                // outs() << tRegInfo->getRegClassName (*i) << "\n";
+            // tRegClass = *i;
+            // }
+            // tRegClass = tRegInfo->getLargestLegalSuperClass (tRegClass, MF);
+            // tRegClass = *(tRegClass->getSuperClasses());
+        // }
+
+        // const TargetRegisterClass* tRegClass =  regInfo.getRegClass(currVirtReg);
+
+        // make sure all instruction contraints are taken into account before getting allocatable registers
+        // first constrain the first virtual register
+        for (unsigned virtReg : LR->virtRegs) {
+            regInfo.constrainRegAttrs(currVirtReg, virtReg);
+        }
+        // for all other registers
+        for (unsigned virtReg : LR->virtRegs) {
+            regInfo.constrainRegAttrs(virtReg, currVirtReg);
+        }
+
+        BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, regInfo.getRegClass(currVirtReg));
+        
+        // save the allocatable physical registers in a set for easy comparison
+        std::set<unsigned> allocatableRegisters;
+        std::set<unsigned> unAllocatableRegisters;
+        for (auto index : temp_regBitVec.set_bits()) {
+            allocatableRegisters.insert(index);
+        }
+
+
+        for (LiveRange* otherLR : interferenceGraph) {
+            if (LR->interferesWith(otherLR)) {
+                // find which register it overlaps with and mark it as unAllocatable
+                if (allocatableRegisters.count(otherLR->physicalReg)) {
+                    unAllocatableRegisters.insert(otherLR->physicalReg);
+                } else {
+                    for (unsigned r : allocatableRegisters) {
+                        if (tRegInfo->regsOverlap(r, otherLR->physicalReg)) {
+                            unAllocatableRegisters.insert(r);
+                            // break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // give all the virtual registers in the live range
+        // any remaining color from the allocatableRegisters
+        for (unsigned r : unAllocatableRegisters) {
+            allocatableRegisters.erase(r);
+        }
+        
+        LR->physicalReg = *(allocatableRegisters.begin());
+        LR->isAllocated = true;
+
+        for (unsigned virtReg : LR->virtRegs) {
+            regInfo.replaceRegWith(virtReg, LR->physicalReg);   
+        }
+
+        // rebuild the interferenceGraph
+        interferenceGraph.insert(LR);
+    }
+
     return EXIT_STATUS_T::DONE;
 }
-
 
 void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRegisterInfo& regInfo) {
 // .. todo look at already live physicalRegs ..
@@ -632,7 +721,7 @@ INITIALIZE_PASS(X86RegisterAllocator,
     X86_REGISTER_ALLOCATOR_PASS_NAME,
     X86_REGISTER_ALLOCATOR_PASS_DESC,
     true, // is CFG only?
-    true  // is analysis?
+    false  // is analysis?
 )
 
 FunctionPass *llvm::createX86RegisterAllocator() { 

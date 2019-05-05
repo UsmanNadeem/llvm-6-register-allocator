@@ -657,6 +657,20 @@ public:
                                                const TargetRegisterClass *RC,
                                                unsigned MinNumRegs = 0);
 
+   /// Constrain the register class or the register bank of the virtual register
+   /// \p Reg (and low-level type) to be a common subclass or a common bank of
+   /// both registers provided respectively (and a common low-level type). Do
+   /// nothing if any of the attributes (classes, banks, or low-level types) of
+   /// the registers are deemed incompatible, or if the resulting register will
+   /// have a class smaller than before and of size less than \p MinNumRegs.
+   /// Return true if such register attributes exist, false otherwise.
+   ///
+   /// \note Use this method instead of constrainRegClass and
+   /// RegisterBankInfo::constrainGenericRegister everywhere but SelectionDAG
+   /// ISel / FastISel and GlobalISel's InstructionSelect pass respectively.
+   bool constrainRegAttrs(unsigned Reg, unsigned ConstrainingReg,
+  unsigned MinNumRegs = 0);
+   
   /// recomputeRegClass - Try to find a legal super-class of Reg's register
   /// class that still satisfies the constraints from the instructions using
   /// Reg.  Returns true if Reg was upgraded.

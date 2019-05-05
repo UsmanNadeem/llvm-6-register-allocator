@@ -47,6 +47,8 @@
 
 using namespace llvm;
 
+cl::opt<bool> CustomRegAlloc("custom-alloc", cl::init(false), cl::desc("Enable custom allocator. Must use with --optimize-regalloc=false"));
+
 cl::opt<bool> EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
                          cl::desc("Enable interprocedural register allocation "
                                   "to reduce load/store at procedure calls."));
@@ -832,12 +834,12 @@ void TargetPassConfig::addMachinePasses() {
   // Run register allocation and passes that are tightly coupled with it,
   // including phi elimination and scheduling.
   if (getOptimizeRegAlloc())
-    addOptimizedRegAlloc(createRegAllocPass(true));
+    addOptimizedRegAlloc(CustomRegAlloc? NULL : createRegAllocPass(true));
   else {
     if (RegAlloc != &useDefaultRegisterAllocator &&
         RegAlloc != &createFastRegisterAllocator)
       report_fatal_error("Must use fast (default) register allocator for unoptimized regalloc.");
-    addFastRegAlloc(createRegAllocPass(false));
+    addFastRegAlloc(CustomRegAlloc? NULL : createRegAllocPass(false));
   }
 
   // Run post-ra passes.
