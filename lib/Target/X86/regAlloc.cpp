@@ -246,11 +246,16 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     //         }
     //     }
 
-    outs() << "*** Total of N = " << numPhysRegs << " Registers in architecture\n";
+    outs() << "*** Total of N = " << numPhysRegs << " Allocatable Registers in architecture\n";
     for (auto index : regBitVec.set_bits()) {
-        outs() << "\tReg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
+        outs() << "\tAllocatable Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
     }
-    
+    //// now print regs that are not Allocatable
+    // regBitVec = regBitVec.flip();
+
+    // for (auto index : regBitVec.set_bits()) {
+    //     outs() << "\tNOT-Allocatable Reg: " << MF.getSubtarget().getRegisterInfo()->getRegAsmName(index) << "\n";
+    // }
 
 
     std::stack<LiveRange*> colorStack;
