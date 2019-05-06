@@ -35,8 +35,9 @@ public:
     unsigned physicalReg;
     unsigned degree;
     bool isAllocated;
+    bool usesPhysicalReg;
 
-    LiveRange() {isAllocated = false; degree = 0;}
+    LiveRange() {usesPhysicalReg = false;isAllocated = false; degree = 0;}
     LiveRange(unsigned virtReg) : LiveRange() {
         virtRegs.insert(virtReg);
     }
@@ -154,6 +155,14 @@ public:
         phiNodes.insert(MI);
     }
 
+    LiveRange* makeNewLiveRangeFor(unsigned _physicalReg) {
+        LiveRange* LR = new LiveRange();
+        interferenceGraph.insert(LR);
+        LR->physicalReg = _physicalReg;
+        LR->usesPhysicalReg = true;
+        return LR;
+    }
+
     LiveRange* getLiveRangeFor(unsigned virtReg) {
         if (interferenceGraphRetrieval.find(virtReg) != interferenceGraphRetrieval.end()) {
             return interferenceGraphRetrieval[virtReg];
@@ -249,7 +258,17 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     const TargetInstrInfo* tInstrInfo = MF.getSubtarget().getInstrInfo();
     
     // get any virtual reg num; just for the purpose of getting the allocatable reg list size
-    unsigned temp_virtReg = *((*interferenceGraph.begin())->virtRegs.begin());
+    // physical only liveranges wont have any virtRegs though
+    // so we have to iterate
+    unsigned temp_virtReg;
+    for (LiveRange* LR : interferenceGraph) {
+        if (!LR->usesPhysicalReg) {
+        // if (LR->virtRegs.size() > 0) {
+            temp_virtReg = *(LR->virtRegs.begin());
+            break;
+        }
+    }
+    // outs() << "temp_virtReg: " << TargetRegisterInfo::virtReg2Index(temp_virtReg) << "\n";
     BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, regInfo.getRegClass(temp_virtReg));
     unsigned numPhysRegs = temp_regBitVec.count();
 
@@ -301,6 +320,7 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     
     while (interferenceGraph.size() > 0) {
         bool removedSomething = false;
+
         for (std::set<LiveRange*>::iterator i = interferenceGraph.begin(); i != interferenceGraph.end();) {
             if ((*i)->degree < numPhysRegs) {
                 removedSomething = true;
@@ -336,12 +356,23 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
             // todo also look at nest depth 
             LiveRange* spillRange = NULL;
             double costRatio = DBL_MAX;
+            double virtualRangesExist = false;
+
+            for (LiveRange* LR : interferenceGraph) {
+                if (LR->usesPhysicalReg == false) {
+                    virtualRangesExist = true;
+                    break;
+                }
+            }
 
             outs() << "\t\t*** Calculating the cost/benefit ratio\n";
             for (std::set<LiveRange*>::iterator i = interferenceGraph.begin(); i != interferenceGraph.end();++i) {
                 // dont want to choose already spilled ranges 
                 // eventhough they might have the lowest cost
                 if ((*i)->contains(spilledRegisters)) continue;
+
+                // dont spill physical ranges
+                if (virtualRangesExist && (*i)->usesPhysicalReg) continue;
 
                 double currCost = (*i)->calculateAndGetCostRatio(regInfo);
                 if (currCost < costRatio) {
@@ -436,7 +467,29 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
         }  // end if (!removedSomething) in the stack pushing phase
     }  // end while (interferenceGraph.size() > 0)  --> the stack pushing phase
 
-// now start popping from the stack and assign actual physical registers
+    // now start popping from the stack and assign actual physical registers
+    // first remove all the physical ranges since they already have an assigned register
+    // we cant iterate on a stack so rebuild the structures
+
+    std::stack<LiveRange*> colorStack2;
+    while (!colorStack.empty()) {
+        LiveRange* LR = colorStack.top();
+        colorStack.pop();
+
+        if (LR->usesPhysicalReg) {
+            LR->isAllocated = true;
+            // rebuild the interferenceGraph
+            interferenceGraph.insert(LR);
+        } else {
+            colorStack2.push(LR);
+        }
+    }
+
+    while (!colorStack2.empty()) {
+        colorStack.push(colorStack2.top());
+        colorStack2.pop();
+    }
+
     while (!colorStack.empty()) {
         LiveRange* LR = colorStack.top();
         colorStack.pop();
@@ -455,19 +508,21 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
             // tRegClass = *(tRegClass->getSuperClasses());
         // }
 
-        // const TargetRegisterClass* tRegClass =  regInfo.getRegClass(currVirtReg);
-
         // make sure all instruction contraints are taken into account before getting allocatable registers
         // first constrain the first virtual register
         for (unsigned virtReg : LR->virtRegs) {
             regInfo.constrainRegAttrs(currVirtReg, virtReg);
         }
-        // for all other registers
+        // then constrain all other virtual registers 
+        // with the first register's contraints
         for (unsigned virtReg : LR->virtRegs) {
             regInfo.constrainRegAttrs(virtReg, currVirtReg);
         }
 
-        BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, regInfo.getRegClass(currVirtReg));
+        BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, 
+            LR->usesPhysicalReg? 
+                tRegInfo->getMinimalPhysRegClass(LR->physicalReg) : regInfo.getRegClass(currVirtReg)
+            );
         
         // save the allocatable physical registers in a set for easy comparison
         std::set<unsigned> allocatableRegisters;
@@ -479,6 +534,8 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
 
         for (LiveRange* otherLR : interferenceGraph) {
             if (LR->interferesWith(otherLR)) {
+                // outs() << TargetRegisterInfo::virtReg2Index(*(LR->virtRegs.begin())) << " interferesWith " << TargetRegisterInfo::virtReg2Index(*(otherLR->virtRegs.begin())) << "\n";
+
                 // find which register it overlaps with and mark it as unAllocatable
                 if (allocatableRegisters.count(otherLR->physicalReg)) {
                     unAllocatableRegisters.insert(otherLR->physicalReg);
@@ -498,8 +555,18 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
         for (unsigned r : unAllocatableRegisters) {
             allocatableRegisters.erase(r);
         }
-        
-        LR->physicalReg = *(allocatableRegisters.begin());
+
+        if (LR->usesPhysicalReg) {
+            if (!allocatableRegisters.count(LR->physicalReg)) {
+                outs() << "Uses: " << tRegInfo->getRegAsmName(LR->physicalReg) << "\n";
+                for (unsigned a : allocatableRegisters)
+                    outs() << "allocatableRegisters Left: " << tRegInfo->getRegAsmName(a) << "\n";
+                report_fatal_error("Could not color.");
+            }
+        } else {
+            LR->physicalReg = *(allocatableRegisters.begin());
+            outs() << "*** Allocated: " << tRegInfo->getRegAsmName(LR->physicalReg) << "\n";
+        }
         LR->isAllocated = true;
 
         for (unsigned virtReg : LR->virtRegs) {
@@ -514,13 +581,74 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
 }
 
 void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRegisterInfo& regInfo) {
-// .. todo look at already live physicalRegs ..
     
     // liveness analysis for every def/virtual SSA Reg 
     for (auto &MBB : MF) {
+        // entry block has physical registers which are live in due to x86 calling convention
+        // they are copied to a virtual reg asap
+        // assume killed afterwards
+        if (MBB.pred_empty()) {  // entry block
+            for (/*RegisterMaskPair*/auto regPair : MBB.liveins()) {
+                auto regNum = regPair.PhysReg;
+                std::set<MachineInstr*> liveInstrs;
+                LiveRange* LR = makeNewLiveRangeFor(regNum);
+
+                for (auto& MI : MBB) {
+                    liveInstrs.insert(&MI);
+                        
+                    for (MachineOperand& u : MI.uses()) {
+                        if (!u.isReg()) continue;
+                        if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
+                        if (u.getReg() == regNum) {
+                            // for reg class
+                            // LR->virtRegs.insert(MI.operands_begin()->getReg());
+                            break;
+                        }
+                    }                    
+                }
+                // update the live range
+                LR->addLiveInstrs(liveInstrs);
+
+                // update the MI-to-virtRegs liveness map
+                for (MachineInstr* MI : liveInstrs) {
+                    livenessInformation[MI].insert(regNum);
+                }
+            }
+        }
+
         for (auto& MI : MBB) {
+            // only gives explicit defs
             for (MachineOperand& def : MI.defs()) {
                 if (!def.isReg()) continue;
+                if (TargetRegisterInfo::isPhysicalRegister(def.getReg())) {
+                    // for physical regs...case where there are defs
+                    // live range is only from the def until the next use within the BB
+                    std::set<MachineInstr*> liveInstrs;
+                    LiveRange* LR = makeNewLiveRangeFor(def.getReg());
+
+                    auto i = getIterForMI(MI);
+                    bool foundUse = false;
+                    for (++i; i!=MBB.end() && !foundUse; ++i) {
+                        liveInstrs.insert(&(*i));
+                        // also includes implicit uses
+                        for (MachineOperand& u : i->uses()) {
+                            if (!u.isReg()) continue;
+                            if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
+                            if (u.getReg() == def.getReg()) {
+                                // LR->virtRegs.insert(i->operands_begin()->getReg());
+                                foundUse = true;
+                                break;
+                            }
+                        }
+                    }
+                    // update the live range
+                    LR->addLiveInstrs(liveInstrs);
+
+                    // update the MI-to-virtRegs liveness map
+                    for (MachineInstr* MI : liveInstrs) {
+                        livenessInformation[MI].insert(def.getReg());
+                    }
+                }
                 if (!TargetRegisterInfo::isVirtualRegister(def.getReg())) continue;
                     
                 // perform Liveness analysis and 
@@ -530,6 +658,49 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
                 outs() << "*** calcLivenessForDef reg #" << TargetRegisterInfo::virtReg2Index(regNum) << "\n";
 
                 calcLivenessForDef(&MI, def, regInfo);
+            }
+
+            // also for physical registers
+            // the case above does not look at implicit definitions
+            // physical reg %rax, used for returns is an implicit definition
+            if (MI.isCall()) {
+                for (MachineOperand& MO : MI.implicit_operands()) {
+                    if (MO.isReg() && MO.isDef() && TargetRegisterInfo::isPhysicalRegister(MO.getReg())) {
+                        // not are implicit defs are allocatable
+                        // e.g. %rsp etc
+                        if (regInfo.isAllocatable(MO.getReg())) {
+                            // live range is the call site, 
+                            // the next stack adjustment instr, 
+                            // and, if ret val is used, the next copy 
+                            std::set<MachineInstr*> liveInstrs;
+                            LiveRange* LR = makeNewLiveRangeFor(MO.getReg());
+
+                            auto i = getIterForMI(MI);
+                            liveInstrs.insert(&(*i));
+                            ++i;    liveInstrs.insert(&(*i));
+                            ++i;
+
+                            // copy rax to virtual register --> the last use of rax
+                            for (MachineOperand& u : i->uses()) {
+                                if (u.isReg() && TargetRegisterInfo::isPhysicalRegister(u.getReg())
+                                    && u.getReg() == MO.getReg()) {
+                                    liveInstrs.insert(&(*i));
+                                    break;
+                                }
+                            }
+
+                            // update the live range
+                            LR->addLiveInstrs(liveInstrs);
+
+                            // update the MI-to-virtRegs liveness map
+                            for (MachineInstr* MI : liveInstrs) {
+                                livenessInformation[MI].insert(MO.getReg());
+                            }                
+                        }
+                    }
+                }
+                
+
             }
         }
     }
