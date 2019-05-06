@@ -261,12 +261,20 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
     // physical only liveranges wont have any virtRegs though
     // so we have to iterate
     unsigned temp_virtReg;
+    bool found_Temp_virtReg = false;
     for (LiveRange* LR : interferenceGraph) {
         if (!LR->usesPhysicalReg) {
         // if (LR->virtRegs.size() > 0) {
+            found_Temp_virtReg = true;
             temp_virtReg = *(LR->virtRegs.begin());
             break;
         }
+    }
+
+    if (!found_Temp_virtReg) {
+        // means that there are no virtual ranges! 
+        // nothing to do!!
+        return EXIT_STATUS_T::DONE;
     }
     // outs() << "temp_virtReg: " << TargetRegisterInfo::virtReg2Index(temp_virtReg) << "\n";
     BitVector temp_regBitVec = tRegInfo->getAllocatableSet(MF, regInfo.getRegClass(temp_virtReg));
