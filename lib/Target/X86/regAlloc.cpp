@@ -212,7 +212,31 @@ public:
 
 bool X86RegisterAllocator::runOnMachineFunction(MachineFunction &MF) {
     outs() << "\n" << "=====================\n" << MF.getName() << "()\n=====================" <<"\n";
+    MachineRegisterInfo& regInfo = MF.getRegInfo();
     for (auto &MBB : MF) {
+        reloop:
+        for (auto& MI : MBB) {
+            const TargetInstrInfo* TII = MF.getSubtarget().getInstrInfo();
+            auto mi = &MI;
+              // Rewrite INSERT_SUBREG as COPY
+            // taken from TwoAddressInstructionPass which is not executed
+              if (mi->isInsertSubreg()) {
+                // From %reg = INSERT_SUBREG %reg, %subreg, subidx
+                // To   %reg:subidx = COPY %subreg
+
+                // const TargetRegisterClass* tRegClass = regInfo.getRegClass(mi->getOperand(0).getReg());
+                // unsigned newVirtReg = regInfo.createVirtualRegister(tRegClass);
+                unsigned SubIdx = mi->getOperand(3).getImm();
+                mi->RemoveOperand(3);
+                assert(mi->getOperand(0).getSubReg() == 0 && "Unexpected subreg idx");
+                mi->getOperand(0).setSubReg(SubIdx);
+                mi->getOperand(0).setIsUndef(mi->getOperand(1).isUndef());
+                mi->RemoveOperand(1);
+                mi->setDesc(TII->get(TargetOpcode::COPY));
+                (--getIterForMI(MI))->eraseFromParent();
+                goto reloop;
+              }            
+        }
         outs() << "Contents of MachineBasicBlock:\n";
         outs() << MBB << "\n";
         outs().flush();
@@ -228,7 +252,6 @@ BEGINNING:
     livenessInformation.clear();
     phiNodes.clear();
 
-    MachineRegisterInfo& regInfo = MF.getRegInfo();
     calcGlobalLivenessInfo(MF, regInfo);
 
     if (interferenceGraph.size() > 0 && color(MF, regInfo) == EXIT_STATUS_T::SPILLED) {
@@ -381,7 +404,7 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
                     continue;
                 }
                 // dont spill physical ranges
-                if (virtualRangesExist && (*i)->usesPhysicalReg) {
+                if (/*virtualRangesExist && */(*i)->usesPhysicalReg) {
                     continue;
                 }
                 double currCost = (*i)->calculateAndGetCostRatio(regInfo);
@@ -417,35 +440,42 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
             // for all defining instructions: save the definition into the same stackSlot
             // for all uses: add load instructions from the stack
             // ignore phi nodes; delete them later
+            std::set<MachineInstr*> toRemove;
             for (unsigned virtReg : spillRange->virtRegs) {
+                std::vector<MachineInstr*> useInstrVector;
                 for (MachineInstr& MI : regInfo.use_instructions(virtReg)) {
+                    useInstrVector.push_back(&MI);
+                }
+                for (MachineInstr* MI : useInstrVector) {
                     // todo check if deleting uses in a range loop causes any problem
                         // ignore if phi
-                    if (!MI.isPHI()) {
+                    if (!MI->isPHI()) {
                         unsigned newVirtReg = regInfo.createVirtualRegister(tRegClass);
                         spilledRegisters.insert(newVirtReg);
                         // load instruction is added BEFORE the specified machine instruction
                         // we need to add a load before the use
                         tInstrInfo->loadRegFromStackSlot (
-                            /*MachineBasicBlock&*/ *(MI.getParent()),
-                            /*MachineBasicBlock::iterator*/ getIterForMI(MI),
+                            /*MachineBasicBlock&*/ *(MI->getParent()),
+                            /*MachineBasicBlock::iterator*/ getIterForMI(*MI),
                             /*DestReg*/ newVirtReg,
                             /*FrameIndex*/ stackSlot,
                             /*const TargetRegisterClass**/     tRegClass,
                             /*const TargetRegisterInfo**/      tRegInfo);
 
                         // replace this use's operand(s) by this load
-                        for (MachineOperand& use : MI.uses()) {
+                        std::vector<MachineOperand*> useOpVector;
+                        for (MachineOperand& use : MI->uses()) {
                             if (!use.isReg()) continue;
                             if (!TargetRegisterInfo::isVirtualRegister(use.getReg())) continue;
                             if (use.getReg() == virtReg) {
-                                use.setReg(newVirtReg);
+                                useOpVector.push_back(&use);
                             }
+                        }
+                        for (MachineOperand* use : useOpVector) {
+                                use->setReg(newVirtReg);
                         }            
                     } else {
-                        phiNodes.erase(&MI);
-
-                        MI.eraseFromParent();
+                        toRemove.insert(MI);
                     }
                 }  // end loop for spilling uses
 
@@ -455,30 +485,39 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
                 for (MachineInstr& MI : regInfo.def_instructions(virtReg)) {
                     if (MI.isPHI()) {
                         // no longer need a phi node since all uses and defs share a stack slot
-                        phiNodes.erase(&MI);
-                        
-                        // todo will this break the for loop?
-                        MI.eraseFromParent();
+                        toRemove.insert(&MI);
                     } else {
                         // store instruction is added BEFORE the specified machine instruction
                         // we need to add a store AFTER each def
-                        MachineBasicBlock::iterator it = getIterForMI(MI);
-                        ++it;
 
-                        spilledRegisters.insert(virtReg);
-                        tInstrInfo->storeRegToStackSlot (
-                            /*MachineBasicBlock&*/ *(MI.getParent()),
-                            /*MachineBasicBlock::iterator*/ it,
-                            /*SrcReg*/ virtReg,
-                            /*isKill*/ false,
-                            /*FrameIndex*/ stackSlot,
-                            /*const TargetRegisterClass**/     tRegClass,
-                            /*const TargetRegisterInfo**/      tRegInfo);
+                        for (MachineOperand& def : MI.defs()) {
+                            if (!def.isReg()) continue;
+                            if (!TargetRegisterInfo::isVirtualRegister(def.getReg())) continue;
+                            if (def.getReg() == virtReg) {
+                                spilledRegisters.insert(def.getReg());
+                                // unsigned newVirtReg = regInfo.createVirtualRegister(tRegClass);
+                                // spilledRegisters.insert(newVirtReg);
+                                // def.setReg(newVirtReg);
+                                MachineBasicBlock::iterator it = getIterForMI(MI);
+                                ++it;
+                                tInstrInfo->storeRegToStackSlot (
+                                    /*MachineBasicBlock&*/ *(MI.getParent()),
+                                    /*MachineBasicBlock::iterator*/ it,
+                                    /*SrcReg*/ def.getReg(),
+                                    /*isKill*/ true,
+                                    /*FrameIndex*/ stackSlot,
+                                    /*const TargetRegisterClass**/     tRegClass,
+                                    /*const TargetRegisterInfo**/      tRegInfo);
+                            }
+                        }   
                     }
                 }  // end loop for spilling uses
 
             }  // end loop for spilling all virtRegs in the equivalence class
-
+            for(MachineInstr* removeThis : toRemove) {
+                phiNodes.erase(removeThis);
+                removeThis->eraseFromParent();
+            }
             // now that we have spilled one live range class we need to restart the algorithm
             return EXIT_STATUS_T::SPILLED;
         }  // end if (!removedSomething) in the stack pushing phase
@@ -558,6 +597,8 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
                     unAllocatableRegisters.insert(otherLR->physicalReg);
                 } else {
                     for (unsigned r : allocatableRegisters) {
+            // outs() << "*** Checking overlap: " << tRegInfo->getRegAsmName(r) << "  "<< tRegInfo->getRegAsmName(otherLR->physicalReg) << "\n";
+            // outs().flush();
                         if (tRegInfo->regsOverlap(r, otherLR->physicalReg)) {
                             unAllocatableRegisters.insert(r);
                             // break;
@@ -578,11 +619,14 @@ EXIT_STATUS_T X86RegisterAllocator::color(MachineFunction &MF, MachineRegisterIn
                 outs() << "Uses: " << tRegInfo->getRegAsmName(LR->physicalReg) << "\n";
                 for (unsigned a : allocatableRegisters)
                     outs() << "allocatableRegisters Left: " << tRegInfo->getRegAsmName(a) << "\n";
-                report_fatal_error("Could not color.");
+                report_fatal_error("Could not color. Register for physical range already used.");
             }
         } else {
+            if (allocatableRegisters.size() == 0) 
+                report_fatal_error("Could not color. Not enough registers left.");
+
             LR->physicalReg = *(allocatableRegisters.begin());
-            outs() << "*** Allocated: " << tRegInfo->getRegAsmName(LR->physicalReg) << "\n";
+            // outs() << "*** Allocated: " << tRegInfo->getRegAsmName(LR->physicalReg) << "\n";
         }
         LR->isAllocated = true;
 
@@ -612,17 +656,19 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
 
                 for (auto& MI : MBB) {
                     liveInstrs.insert(&MI);
+                    auto tRegInfo = MF.getSubtarget().getRegisterInfo();
+                    if (MI.readsRegister(regNum, tRegInfo)) break;
                         
-                    bool foundUse = false;
-                    for (MachineOperand& u : MI.uses()) {
-                        if (!u.isReg()) continue;
-                        if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
-                        if (u.getReg() == regNum) {
-                            foundUse = true;
-                            break;
-                        }
-                    }   
-                    if (foundUse) break;                 
+                    // bool foundUse = false;
+                    // for (MachineOperand& u : MI.uses()) {
+                    //     if (!u.isReg()) continue;
+                    //     if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
+                    //     if (u.getReg() == regNum) {
+                    //         foundUse = true;
+                    //         break;
+                    //     }
+                    // }   
+                    // if (foundUse) break;                 
                 }
                 // update the live range
                 LR->addLiveInstrs(liveInstrs);
@@ -655,17 +701,26 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
                         
                     for (++i; i!=MBB.end(); ++i) {
                         if (foundUse) break;
+                    auto tRegInfo = MF.getSubtarget().getRegisterInfo();
+                    // if(i->killsRegister(def.getReg(), tRegInfo) ) break;
+                    // if (i->readsRegister(def.getReg(), tRegInfo)) break;
+                    if (i->registerDefIsDead(def.getReg(), tRegInfo)) {
+                        break;
+                    }
                         liveInstrs.insert(&(*i));
+                    // if (i->definesRegister (def.getReg(), tRegInfo)) {
+                        // break;
+                    // }
                         // also includes implicit uses
-                        for (MachineOperand& u : i->uses()) {
-                            if (!u.isReg()) continue;
-                            if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
-                            if (u.getReg() == def.getReg()) {
-                                // LR->virtRegs.insert(i->operands_begin()->getReg());
-                                foundUse = true;
-                                break;
-                            }
-                        }
+                        // for (MachineOperand& u : i->uses()) {
+                        //     if (!u.isReg()) continue;
+                        //     if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
+                        //     if (u.getReg() == def.getReg()) {
+                        //         // LR->virtRegs.insert(i->operands_begin()->getReg());
+                        //         foundUse = true;
+                        //         break;
+                        //     }
+                        // }
                     }
                     // update the live range
                     LR->addLiveInstrs(liveInstrs);
@@ -700,26 +755,35 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
                         LiveRange* LR = makeNewLiveRangeFor(MO.getReg());
 
                         auto i = getIterForMI(MI);
-                        liveInstrs.insert(&(*i));
 
                         bool foundUse = false;
                         if (MO.isDead()) {
+                            liveInstrs.insert(&(*i));
                             foundUse = true;
                         }
                             
                         for (++i; i!=MBB.end(); ++i) {
                             if (foundUse) break;
-                            liveInstrs.insert(&(*i));
-                            // also includes implicit uses
-                            for (MachineOperand& u : i->uses()) {
-                                if (!u.isReg()) continue;
-                                if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
-                                if (u.getReg() == MO.getReg()) {
-                                    // LR->virtRegs.insert(i->operands_begin()->getReg());
-                                    foundUse = true;
-                                    break;
-                                }
+                            auto tRegInfo = MF.getSubtarget().getRegisterInfo();
+                    // if(i->killsRegister(MO.getReg(), tRegInfo) ) break;
+                            if (i->registerDefIsDead(MO.getReg(), tRegInfo)) {
+                                break;
                             }
+                            // if (i->definesRegister (MO.getReg(), tRegInfo)) {
+                            //     break;
+                            // }
+                            liveInstrs.insert(&(*i));
+                            // if (i->readsRegister(MO.getReg(), tRegInfo)) break;
+                            // // also includes implicit uses
+                            // for (MachineOperand& u : i->uses()) {
+                            //     if (!u.isReg()) continue;
+                            //     if (!TargetRegisterInfo::isPhysicalRegister(u.getReg())) continue;
+                            //     if (u.getReg() == MO.getReg()) {
+                            //         // LR->virtRegs.insert(i->operands_begin()->getReg());
+                            //         foundUse = true;
+                            //         break;
+                            //     }
+                            // }
                         }
 
                         // update the live range
@@ -775,13 +839,19 @@ void X86RegisterAllocator::calcGlobalLivenessInfo(MachineFunction &MF, MachineRe
     outs() << "*** Total Number of live ranges: " << interferenceGraph.size() << "\n";
     for (MachineInstr* phi : getPhiNodes()) {
         // save live ranges for all virtual register operands 
+        //todo convert to a set
         std::vector<LiveRange*> toMerge;
         for (unsigned int i = 0; i < phi->getNumOperands(); ++i) {
             if (!phi->getOperand(i).isReg()) continue;
             if (!TargetRegisterInfo::isVirtualRegister(phi->getOperand(i).getReg())) continue;
 
             LiveRange* LR = getLiveRangeFor(phi->getOperand(i).getReg());
-            toMerge.push_back(LR);
+
+            bool add = true;
+            for (LiveRange* _LR : toMerge) {
+                if (LR == _LR) add = false;
+            }
+            if (add) toMerge.push_back(LR);
         }
 
         // merge
@@ -835,6 +905,7 @@ void X86RegisterAllocator::calcLivenessForDef(MachineInstr* def, MachineOperand&
     for (MachineInstr& u : regInfo.use_instructions(regNum)) {
         MachineInstr* user = &u;
         MachineInstr* CurrMI = user;
+        std::stack<MachineBasicBlock*> BBlist;
 
         // Phi nodes are special. the use operands might not be dominated by their defs 
         // so propogate the liveness information 
@@ -846,10 +917,19 @@ void X86RegisterAllocator::calcLivenessForDef(MachineInstr* def, MachineOperand&
             auto regOperandNum = user->findRegisterUseOperandIdx(regNum);
             auto MBBOperand = user->getOperand(regOperandNum + 1);
             auto MBB = MBBOperand.getMBB();
-            CurrMI = &(MBB->instr_back());
+            if (MBB->empty()) {
+                unsigned countPred = 0;
+                // there is no num predecessors function...
+                for (MachineBasicBlock* pred : MBB->predecessors()) {
+                    ++countPred;
+                    CurrMI = &(pred->instr_back());
+                }
+                assert(countPred == 1);
+            } else {
+                CurrMI = &(MBB->instr_back());
+            }
         }
 
-        std::queue<MachineBasicBlock*> BBlist;
         liveInstrs.insert(CurrMI);
         VisitedBBlist.insert(CurrMI->getParent());
 
@@ -872,7 +952,7 @@ void X86RegisterAllocator::calcLivenessForDef(MachineInstr* def, MachineOperand&
         // liveness analysis for all other BBs
         while (!BBlist.empty()) {
             // get the last instr
-            MachineBasicBlock* curBB = BBlist.front();
+            MachineBasicBlock* curBB = BBlist.top();
             BBlist.pop();
 
             if (VisitedBBlist.count(curBB)) {
@@ -882,6 +962,9 @@ void X86RegisterAllocator::calcLivenessForDef(MachineInstr* def, MachineOperand&
             VisitedBBlist.insert(curBB);
             
             if (curBB->empty()) {
+                for (MachineBasicBlock* MBB : curBB->predecessors()) {
+                    if (!VisitedBBlist.count(MBB)) BBlist.push(MBB);
+                }
                 continue;
             }
 

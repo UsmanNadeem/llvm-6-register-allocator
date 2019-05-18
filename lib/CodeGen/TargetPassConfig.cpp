@@ -1034,8 +1034,10 @@ bool TargetPassConfig::usingDefaultRegAlloc() const {
 /// Add the minimum set of target-independent passes that are required for
 /// register allocation. No coalescing or scheduling.
 void TargetPassConfig::addFastRegAlloc(FunctionPass *RegAllocPass) {
-  addPass(&PHIEliminationID, false);
-  addPass(&TwoAddressInstructionPassID, false);
+  if (RegAllocPass) {
+    addPass(&PHIEliminationID, false);
+    addPass(&TwoAddressInstructionPassID, false);
+  }
 
   if (RegAllocPass)
     addPass(RegAllocPass);
@@ -1059,14 +1061,19 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
 
   // Edge splitting is smarter with machine loop info.
   addPass(&MachineLoopInfoID, false);
-  addPass(&PHIEliminationID, false);
+
+  if (RegAllocPass)
+    addPass(&PHIEliminationID, false);
 
   // Eventually, we want to run LiveIntervals before PHI elimination.
   if (EarlyLiveIntervals)
     addPass(&LiveIntervalsID, false);
 
-  addPass(&TwoAddressInstructionPassID, false);
-  addPass(&RegisterCoalescerID);
+  if (RegAllocPass)
+    addPass(&TwoAddressInstructionPassID, false);
+  
+  if (RegAllocPass)
+    addPass(&RegisterCoalescerID);
 
   // The machine scheduler may accidentally create disconnected components
   // when moving subregister definitions around, avoid this by splitting them to

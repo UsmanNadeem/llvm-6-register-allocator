@@ -251,6 +251,27 @@ MCOperand X86MCInstLower::LowerSymbolOperand(const MachineOperand &MO,
 /// a short fixed-register form.
 static void SimplifyShortImmForm(MCInst &Inst, unsigned Opcode) {
   unsigned ImmOp = Inst.getNumOperands() - 1;
+  if(!(Inst.getOperand(0).isReg() &&
+         (Inst.getOperand(ImmOp).isImm() || Inst.getOperand(ImmOp).isExpr()) &&
+           ((Inst.getNumOperands() == 3 && Inst.getOperand(1).isReg() &&
+             Inst.getOperand(0).getReg() == Inst.getOperand(1).getReg()) ||
+            Inst.getNumOperands() == 2))) {
+    // outs() << "/X86MCInstLower.cpp:258: " << Inst << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(0): " << Inst.getOperand(0) << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(ImmOp): " << Inst.getOperand(ImmOp) << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(ImmOp).isImm(): " << Inst.getOperand(ImmOp).isImm() << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(ImmOp).isExpr(): " << Inst.getOperand(ImmOp).isExpr() << "\n";
+
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getNumOperands(): " << Inst.getNumOperands() << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(1): " << Inst.getOperand(1) << "\n";
+    // outs() << "/X86MCInstLower.cpp:258 Inst.getOperand(1).isReg(): " << Inst.getOperand(1).isReg() << "\n";
+    // outs() << "\n";
+    // Inst.dump_pretty(outs());
+    // outs() << "\n";
+    // outs().flush();
+    return;
+  }
+
   assert(Inst.getOperand(0).isReg() &&
          (Inst.getOperand(ImmOp).isImm() || Inst.getOperand(ImmOp).isExpr()) &&
          ((Inst.getNumOperands() == 3 && Inst.getOperand(1).isReg() &&
